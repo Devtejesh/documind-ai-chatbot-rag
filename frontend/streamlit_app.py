@@ -21,9 +21,6 @@ if "messages" not in st.session_state:
 if "documents" not in st.session_state:
     st.session_state.documents = []
 
-if "pdf_names" not in st.session_state:
-    st.session_state.pdf_names = []
-
 st.subheader("📄 Upload your PDFs")
 
 uploaded_files = st.file_uploader(
@@ -38,30 +35,29 @@ if st.button("Process PDFs", disabled=not uploaded_files):
         st.error("Please upload a maximum of 2 PDF files.")
     else:
         try:
-            with st.spinner("Reading PDF documents..."):
+            with st.spinner("Extracting text, creating embeddings and saving..."):
                 documents = process_uploaded_pdfs(uploaded_files)
 
             st.session_state.documents = documents
-            st.session_state.pdf_names = [
-                file.name for file in uploaded_files
-            ]
 
             st.success(
-                f"Processed {len(uploaded_files)} PDF(s) "
-                f"and extracted {len(documents)} text chunks."
+                f"Processed {len(documents)} PDF(s) and saved their "
+                "embeddings to PostgreSQL."
             )
 
         except Exception as exc:
             st.error(f"PDF processing failed: {exc}")
 
-if st.session_state.pdf_names:
+if st.session_state.documents:
     st.caption(
-        "Loaded PDFs: " + ", ".join(st.session_state.pdf_names)
+        "Loaded PDFs: "
+        + ", ".join(
+            dict.fromkeys(doc["filename"] for doc in st.session_state.documents)
+        )
     )
 
-    if st.button("Clear PDFs"):
+    if st.button("Clear PDFs from this chat"):
         st.session_state.documents = []
-        st.session_state.pdf_names = []
         st.rerun()
 
 st.divider()
@@ -81,7 +77,7 @@ if user_message:
         st.markdown(user_message)
 
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
+        with st.spinner("Searching documents and generating an answer..."):
             try:
                 context = None
 
@@ -89,13 +85,13 @@ if user_message:
                     relevant_chunks = retrieve_relevant_chunks(
                         user_message,
                         st.session_state.documents,
+                        top_k=4,
                     )
 
                     if not relevant_chunks:
                         answer = (
-                            "I couldn't find relevant information "
-                            "for this question in the uploaded PDFs. "
-                            "Try using terms from the documents."
+                            "I couldn't find relevant information in the "
+                            "uploaded PDFs. Please try another question."
                         )
                     else:
                         context = "\n\n".join(
@@ -128,6 +124,8 @@ if user_message:
 
             except AIServiceError:
                 st.error(
-                    "Gemini could not respond right now. "
-                    "Please try again in a little while."
+                    "Gemini could not respond right now. Please try again later."
                 )
+
+            except Exception as exc:
+                st.error(f"Request failed: {exc}")
