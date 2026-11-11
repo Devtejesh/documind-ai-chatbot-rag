@@ -16,6 +16,9 @@ from chatbot.config import (
 from chatbot.vector_store import save_chunks, search_chunks
 
 
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
+
 def _embed_texts(texts, task_type):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is missing in .env")
@@ -23,7 +26,6 @@ def _embed_texts(texts, task_type):
     client = genai.Client(api_key=GEMINI_API_KEY)
     vectors = []
 
-    # Small batches reduce request size and simplify error handling.
     for start in range(0, len(texts), 16):
         batch = texts[start:start + 16]
 
@@ -37,34 +39,48 @@ def _embed_texts(texts, task_type):
         )
 
         if not result.embeddings or len(result.embeddings) != len(batch):
-            raise RuntimeError("Embedding service returned incomplete results.")
+            raise RuntimeError(
+                "Embedding service returned incomplete results."
+            )
 
         for item in result.embeddings:
             values = list(item.values)
             norm = math.sqrt(sum(value * value for value in values))
 
             if norm == 0:
-                raise RuntimeError("Embedding service returned a zero vector.")
+                raise RuntimeError(
+                    "Embedding service returned a zero vector."
+                )
 
-            # Normalize 768-dimensional gemini-embedding-001 vectors.
             vectors.append([value / norm for value in values])
 
     return vectors
 
 
-def process_uploaded_pdfs(uploaded_files):
-    if len(uploaded_files) > 2:
-        raise ValueError("Please upload a maximum of 2 PDF files.")
+def process_uploaded_pdfs(uploaded_files, collection_id="documind"):
+    if not collection_id:
+        raise ValueError("Collection ID is required.")
 
     chunks = []
 
     for uploaded_file in uploaded_files:
+
+        if uploaded_file.size > MAX_FILE_SIZE:
+            raise ValueError(
+                f"{uploaded_file.name} exceeds the 50 MB limit."
+            )
+
         document_id = str(uuid.uuid4())
+
         reader = PdfReader(BytesIO(uploaded_file.getvalue()))
         chunk_index = 0
 
         for page_number, page in enumerate(reader.pages, start=1):
-            text = re.sub(r"\s+", " ", page.extract_text() or "").strip()
+            text = re.sub(
+                r"\s+",
+                " ",
+                page.extract_text() or "",
+            ).strip()
 
             if not text:
                 continue
@@ -87,6 +103,7 @@ def process_uploaded_pdfs(uploaded_files):
                             "text": chunk_text,
                         }
                     )
+
                     chunk_index += 1
 
                 if end == len(text):
@@ -107,9 +124,8 @@ def process_uploaded_pdfs(uploaded_files):
     for chunk, vector in zip(chunks, vectors):
         chunk["embedding"] = vector
 
-    save_chunks(chunks)
+    save_chunks(chunks, collection_id=collection_id)
 
-    # Return document IDs for restricting future searches to these PDFs.
     return [
         {
             "document_id": doc_id,
@@ -122,13 +138,22 @@ def process_uploaded_pdfs(uploaded_files):
     ]
 
 
-def retrieve_relevant_chunks(question, documents, top_k=4):
-    document_ids = list(
-        dict.fromkeys(doc["document_id"] for doc in documents)
+def retrieve_relevant_chunks(
+    question,
+    documents=None,
+    top_k=4,
+    collection_id="documind",
+):
+    if not collection_id:
+        raise ValueError("Collection ID is required.")
+
+    question_vectors = _embed_texts(
+        [question],
+        "RETRIEVAL_QUERY",
     )
 
-    if not document_ids:
-        return []
-
-    question_vectors = _embed_texts([question], "RETRIEVAL_QUERY")
-    return search_chunks(question_vectors[0], document_ids, top_k=top_k)
+    return search_chunks(
+        question_vectors[0],
+        collection_id=collection_id,
+        top_k=top_k,
+    )
